@@ -1,0 +1,159 @@
+name: release
+
+on:
+  release:
+    types: [created, prereleased, released]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  version:
+    # created+draft  → commit-sha build
+    # prereleased    → rc.N build (auto-incremented)
+    # released       → final build
+    # created+!draft → skip (released/prereleased handles it)
+    if: >-
+      github.event.action == 'released' ||
+      github.event.action == 'prereleased' ||
+      (github.event.action == 'created' && github.event.release.draft)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      image_tag: ${{ steps.resolve.outputs.image_tag }}
+      chart_version: ${{ steps.resolve.outputs.chart_version }}
+      app_version: ${{ steps.resolve.outputs.app_version }}
+      is_latest: ${{ steps.resolve.outputs.is_latest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+
+          if [[ "${{ github.event.release.draft }}" == "true" ]]; then
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            {
+              echo "image_tag=sha-${SHORT_SHA}"
+              echo "chart_version=${TAG_NAME#v}-sha.${SHORT_SHA}"
+              echo "app_version=sha-${SHORT_SHA}"
+              echo "is_latest=false"
+            } >> "$GITHUB_OUTPUT"
+
+          elif [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
+            OWNER="${{ github.repository_owner }}"
+            PACKAGE="aws-load-balancer-controller"
+
+            EXISTING_TAGS=$( \
+              gh api "/orgs/${OWNER}/packages/container/${PACKAGE}/versions" \
+                --paginate --jq '.[].metadata.container.tags[]' 2>/dev/null \
+              || gh api "/users/${OWNER}/packages/container/${PACKAGE}/versions" \
+                --paginate --jq '.[].metadata.container.tags[]' 2>/dev/null \
+              || true)
+
+            LAST_RC=$(echo "$EXISTING_TAGS" \
+              | grep -E "^${TAG_NAME}-rc\.[0-9]+$" \
+              | sed "s/^${TAG_NAME}-rc\.//" \
+              | sort -n | tail -1)
+
+            NEXT_RC=$((${LAST_RC:-0} + 1))
+            {
+              echo "image_tag=${TAG_NAME}-rc.${NEXT_RC}"
+              echo "chart_version=${TAG_NAME#v}-rc.${NEXT_RC}"
+              echo "app_version=${TAG_NAME}-rc.${NEXT_RC}"
+              echo "is_latest=false"
+            } >> "$GITHUB_OUTPUT"
+
+          else
+            {
+              echo "image_tag=${TAG_NAME}"
+              echo "chart_version=${TAG_NAME#v}"
+              echo "app_version=${TAG_NAME}"
+              echo "is_latest=true"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  container-image:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read Go version
+        id: go
+        run: echo "version=$(cat .go-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.image_tag }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.is_latest }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BASE_IMAGE=public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-nonroot:2025-12-09-1765306943.2023
+            BUILD_IMAGE=public.ecr.aws/docker/library/golang:${{ steps.go.outputs.version }}
+
+  helm-chart:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login "${{ env.REGISTRY }}" \
+            -u "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Package Helm chart
+        run: |
+          helm package helm/aws-load-balancer-controller \
+            --version "${{ needs.version.outputs.chart_version }}" \
+            --app-version "${{ needs.version.outputs.app_version }}"
+
+      - name: Push Helm chart
+        run: |
+          REPO_OWNER="${{ github.repository_owner }}"
+          helm push \
+            "aws-load-balancer-controller-${{ needs.version.outputs.chart_version }}.tgz" \
+            "oci://${{ env.REGISTRY }}/${REPO_OWNER,,}/charts"
