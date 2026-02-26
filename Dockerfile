@@ -10,7 +10,8 @@ COPY go.sum go.sum
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN --mount=type=bind,target=. \
-    GOPROXY=direct go mod download
+    --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 FROM base AS build
 ARG TARGETOS
@@ -18,6 +19,7 @@ ARG TARGETARCH
 ENV VERSION_PKG=sigs.k8s.io/aws-load-balancer-controller/pkg/version
 RUN --mount=type=bind,target=. \
     --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
     GIT_VERSION=$(git describe --tags --dirty --always) && \
     GIT_COMMIT=$(git rev-parse HEAD) && \
     BUILD_DATE=$(date +%Y-%m-%dT%H:%M:%S%z) && \
