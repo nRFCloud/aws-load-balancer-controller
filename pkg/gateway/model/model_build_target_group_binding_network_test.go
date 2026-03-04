@@ -31,7 +31,8 @@ func Test_buildTargetGroupBindingNetworking_standardBuilder(t *testing.T) {
 		targetPort intstr.IntOrString
 		tgSpec     elbv2model.TargetGroupSpec
 
-		sgOutput securityGroupOutput
+		sgOutput           securityGroupOutput
+		loadBalancerSubnets []ec2types.Subnet
 
 		expected *elbv2modelk8s.TargetGroupBindingNetworking
 	}{
@@ -422,7 +423,7 @@ func Test_buildTargetGroupBindingNetworking_standardBuilder(t *testing.T) {
 			},
 		},
 		{
-			name: "nil backend SG token (cross-region) returns nil networking",
+			name: "nil backend SG token (cross-region) returns nil networking when no LB subnets",
 			sgOutput: securityGroupOutput{
 				securityGroupTokens:           []core.StringToken{core.LiteralStringToken("sg-remote-region")},
 				backendSecurityGroupToken:     nil,
@@ -437,12 +438,183 @@ func Test_buildTargetGroupBindingNetworking_standardBuilder(t *testing.T) {
 			targetPort: intstr80,
 			expected:   nil,
 		},
+		{
+			name: "nil backend SG token (cross-region) uses load balancer subnet CIDRs for edge ALB (IPv4)",
+			disableRestrictedSGRules: false,
+			sgOutput: securityGroupOutput{
+				securityGroupTokens:           []core.StringToken{core.LiteralStringToken("sg-edge")},
+				backendSecurityGroupToken:     nil,
+				backendSecurityGroupAllocated: false,
+			},
+			tgSpec: elbv2model.TargetGroupSpec{
+				Protocol:     elbv2model.ProtocolHTTP,
+				IPAddressType: elbv2model.TargetGroupIPAddressTypeIPv4,
+				HealthCheckConfig: &elbv2model.TargetGroupHealthCheckConfig{
+					Port: &intstr80,
+				},
+			},
+			targetPort: intstr80,
+			loadBalancerSubnets: []ec2types.Subnet{
+				{
+					CidrBlock: awssdk.String("10.0.1.0/24"),
+					Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+						{
+							Ipv6CidrBlock: awssdk.String("2600:1f13:837:8500::/64"),
+							Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+								State: ec2types.SubnetCidrBlockStateCodeAssociated,
+							},
+						},
+					},
+				},
+				{
+					CidrBlock: awssdk.String("10.0.2.0/24"),
+					Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+						{
+							Ipv6CidrBlock: awssdk.String("2600:1f13:837:8504::/64"),
+							Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+								State: ec2types.SubnetCidrBlockStateCodeAssociated,
+							},
+						},
+					},
+				},
+			},
+			expected: &elbv2modelk8s.TargetGroupBindingNetworking{
+				Ingress: []elbv2modelk8s.NetworkingIngressRule{
+					{
+						From: []elbv2modelk8s.NetworkingPeer{
+							{IPBlock: &elbv2api.IPBlock{CIDR: "10.0.1.0/24"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "10.0.2.0/24"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "2600:1f13:837:8500::/64"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "2600:1f13:837:8504::/64"}},
+						},
+						Ports: []elbv2api.NetworkingPort{
+							{Protocol: &protocolTCP, Port: &intstr80},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "nil backend SG token (cross-region) uses load balancer subnet CIDRs for edge ALB (IPv6)",
+			disableRestrictedSGRules: false,
+			sgOutput: securityGroupOutput{
+				securityGroupTokens:           []core.StringToken{core.LiteralStringToken("sg-edge")},
+				backendSecurityGroupToken:     nil,
+				backendSecurityGroupAllocated: false,
+			},
+			tgSpec: elbv2model.TargetGroupSpec{
+				Protocol:     elbv2model.ProtocolHTTP,
+				IPAddressType: elbv2model.TargetGroupIPAddressTypeIPv6,
+				HealthCheckConfig: &elbv2model.TargetGroupHealthCheckConfig{
+					Port: &intstr80,
+				},
+			},
+			targetPort: intstr80,
+			loadBalancerSubnets: []ec2types.Subnet{
+				{
+					CidrBlock: awssdk.String("10.0.1.0/24"),
+					Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+						{
+							Ipv6CidrBlock: awssdk.String("2600:1f13:837:8500::/64"),
+							Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+								State: ec2types.SubnetCidrBlockStateCodeAssociated,
+							},
+						},
+					},
+				},
+				{
+					CidrBlock: awssdk.String("10.0.2.0/24"),
+					Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+						{
+							Ipv6CidrBlock: awssdk.String("2600:1f13:837:8504::/64"),
+							Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+								State: ec2types.SubnetCidrBlockStateCodeAssociated,
+							},
+						},
+					},
+				},
+			},
+			expected: &elbv2modelk8s.TargetGroupBindingNetworking{
+				Ingress: []elbv2modelk8s.NetworkingIngressRule{
+					{
+						From: []elbv2modelk8s.NetworkingPeer{
+							{IPBlock: &elbv2api.IPBlock{CIDR: "10.0.1.0/24"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "10.0.2.0/24"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "2600:1f13:837:8500::/64"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "2600:1f13:837:8504::/64"}},
+						},
+						Ports: []elbv2api.NetworkingPort{
+							{Protocol: &protocolTCP, Port: &intstr80},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "nil backend SG token (cross-region) uses load balancer subnet CIDRs for edge ALB (dualstack)",
+			disableRestrictedSGRules: false,
+			sgOutput: securityGroupOutput{
+				securityGroupTokens:           []core.StringToken{core.LiteralStringToken("sg-edge")},
+				backendSecurityGroupToken:     nil,
+				backendSecurityGroupAllocated: false,
+			},
+			tgSpec: elbv2model.TargetGroupSpec{
+				Protocol:     elbv2model.ProtocolHTTP,
+				IPAddressType: elbv2model.TargetGroupIPAddressTypeIPv4,
+				HealthCheckConfig: &elbv2model.TargetGroupHealthCheckConfig{
+					Port: &intstr80,
+				},
+			},
+			targetPort: intstr80,
+			loadBalancerSubnets: []ec2types.Subnet{
+				{
+					CidrBlock: awssdk.String("10.0.1.0/24"),
+					Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+						{
+							Ipv6CidrBlock: awssdk.String("2600:1f13:837:8500::/64"),
+							Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+								State: ec2types.SubnetCidrBlockStateCodeAssociated,
+							},
+						},
+					},
+				},
+				{
+					CidrBlock: awssdk.String("10.0.2.0/24"),
+					Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+						{
+							Ipv6CidrBlock: awssdk.String("2600:1f13:837:8504::/64"),
+							Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+								State: ec2types.SubnetCidrBlockStateCodeAssociated,
+							},
+						},
+					},
+				},
+			},
+			expected: &elbv2modelk8s.TargetGroupBindingNetworking{
+				Ingress: []elbv2modelk8s.NetworkingIngressRule{
+					{
+						From: []elbv2modelk8s.NetworkingPeer{
+							{IPBlock: &elbv2api.IPBlock{CIDR: "10.0.1.0/24"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "10.0.2.0/24"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "2600:1f13:837:8500::/64"}},
+							{IPBlock: &elbv2api.IPBlock{CIDR: "2600:1f13:837:8504::/64"}},
+						},
+						Ports: []elbv2api.NetworkingPort{
+							{Protocol: &protocolTCP, Port: &intstr80},
+						},
+					},
+				},
+			},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			builder := &targetGroupBindingNetworkBuilderImpl{
 				disableRestrictedSGRules: tc.disableRestrictedSGRules,
 				sgOutput:                 tc.sgOutput,
+			}
+			if tc.loadBalancerSubnets != nil {
+				builder.loadBalancerSubnets = tc.loadBalancerSubnets
 			}
 
 			result, err := builder.buildTargetGroupBindingNetworking(tc.tgSpec, tc.targetPort)

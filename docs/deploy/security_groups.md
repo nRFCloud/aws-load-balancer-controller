@@ -77,6 +77,18 @@ If `--backend-security-group` is left empty, a security group with the following
     - for this to take effect, `--enable-backend-security-group` needs to be true and user explicitly specify security group using annotation: `alb.ingress.kubernetes.io/security-groups` or `service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules`
     - when set to `false` (default value) or not set, the controller takes the individual annotations
   
+### Cross-region (Gateway API)
+
+When a Gateway deploys a load balancer in a different region or VPC from the cluster (for example, an edge VPC ALB), the shared backend security group cannot be used: that security group lives in the cluster VPC and cannot be attached to a load balancer in another VPC or region.
+
+For cross-region Gateway API load balancers, the controller still ensures targets can receive traffic and health checks from the load balancer. Instead of using the shared backend security group as the traffic source, it adds ingress rules on Node/Pod security groups using the **load balancer subnet CIDRs** as the allowed source. Traffic and health checks from the edge ALB (whose ENIs are in those subnets) are therefore allowed to reach targets in the cluster VPC.
+
+- The controller derives the allowed CIDRs from the subnets where the load balancer is deployed (the edge ALB subnets).
+- Both **IPv4 and IPv6** subnet CIDRs are included when the load balancer uses dual-stack subnets, so dual-stack edge ALBs are supported.
+- The same port and protocol rules (target port, health check port, optional control port) apply as for the shared backend security group path.
+
+This behavior is automatic for Gateways that target a different region via `LoadBalancerConfiguration` (for example, when `region` is set to a non-default region). No additional configuration is required.
+
 ### Port Range Restrictions
 
 From version v2.3.0 onwards, the controller restricts port ranges in the backend security group rules by default. This improves the security of the default configuration. The LBC should generate the necessary rules to permit traffic, based on the Service and Ingress resources. 

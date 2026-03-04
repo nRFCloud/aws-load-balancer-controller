@@ -46,7 +46,13 @@ func (builder *targetGroupBindingNetworkBuilderImpl) buildTargetGroupBindingNetw
 	if len(builder.sgOutput.securityGroupTokens) == 0 {
 		return builder.nlbNoSecurityGroups(targetPort, targetGroupSpec)
 	}
-	return builder.standardBuilder(targetPort, *targetGroupSpec.HealthCheckConfig.Port, targetGroupSpec.Protocol, targetGroupSpec.TargetControlPort), nil
+	result := builder.standardBuilder(targetPort, *targetGroupSpec.HealthCheckConfig.Port, targetGroupSpec.Protocol, targetGroupSpec.TargetControlPort)
+	if result == nil {
+		// Cross-region: no backend SG attached to edge ALB; use load balancer (edge) subnet CIDRs
+		// so the edge VPC ALB can reach targets for health checks and traffic.
+		return builder.crossRegionBackendBuilder(targetPort, *targetGroupSpec.HealthCheckConfig.Port, targetGroupSpec.Protocol, targetGroupSpec.TargetControlPort, targetGroupSpec.IPAddressType)
+	}
+	return result, nil
 }
 
 func (builder *targetGroupBindingNetworkBuilderImpl) standardBuilder(targetPort intstr.IntOrString, healthCheckPort intstr.IntOrString, tgProtocol elbv2model.Protocol, targetControlPort *int32) *elbv2modelk8s.TargetGroupBindingNetworking {
@@ -139,6 +145,74 @@ func (builder *targetGroupBindingNetworkBuilderImpl) standardBuilder(targetPort 
 	return &elbv2modelk8s.TargetGroupBindingNetworking{
 		Ingress: networkingRules,
 	}
+}
+
+// crossRegionBackendBuilder builds TGB networking for cross-region (edge VPC ALB) when there is no
+// shared backend SG: it allows traffic from the load balancer (edge ALB) subnet CIDRs so health
+// checks and traffic from the edge ALB can reach targets in the data plane VPC.
+// For dual-stack edge ALBs, both IPv4 and IPv6 subnet CIDRs are included.
+func (builder *targetGroupBindingNetworkBuilderImpl) crossRegionBackendBuilder(targetPort intstr.IntOrString, healthCheckPort intstr.IntOrString, tgProtocol elbv2model.Protocol, targetControlPort *int32, ipAddressType elbv2model.TargetGroupIPAddressType) (*elbv2modelk8s.TargetGroupBindingNetworking, error) {
+	ipv4CIDRs := builder.parseSubnetCIDRBlocks(elbv2model.TargetGroupIPAddressTypeIPv4, builder.loadBalancerSubnets)
+	ipv6CIDRs := builder.parseSubnetCIDRBlocks(elbv2model.TargetGroupIPAddressTypeIPv6, builder.loadBalancerSubnets)
+	loadBalancerSubnetCIDRs := append(ipv4CIDRs, ipv6CIDRs...)
+	if len(loadBalancerSubnetCIDRs) == 0 {
+		return nil, nil
+	}
+	peers := builder.buildPeersFromSourceRangeCIDRs(loadBalancerSubnetCIDRs)
+
+	protocolTCP := elbv2api.NetworkingProtocolTCP
+	protocolUDP := elbv2api.NetworkingProtocolUDP
+	udpSupported := tgProtocol == elbv2model.ProtocolUDP || tgProtocol == elbv2model.ProtocolTCP_UDP || tgProtocol == elbv2model.ProtocolQUIC || tgProtocol == elbv2model.ProtocolTCP_QUIC
+
+	if builder.disableRestrictedSGRules {
+		ports := []elbv2api.NetworkingPort{
+			{Protocol: &protocolTCP, Port: nil},
+		}
+		if udpSupported {
+			ports = append(ports, elbv2api.NetworkingPort{Protocol: &protocolUDP, Port: nil})
+		}
+		return &elbv2modelk8s.TargetGroupBindingNetworking{
+			Ingress: []elbv2modelk8s.NetworkingIngressRule{
+				{From: peers, Ports: ports},
+			},
+		}, nil
+	}
+
+	var networkingPorts []elbv2api.NetworkingPort
+	protocolToUse := &protocolTCP
+	if udpSupported {
+		protocolToUse = &protocolUDP
+	}
+	networkingPorts = append(networkingPorts, elbv2api.NetworkingPort{
+		Protocol: protocolToUse,
+		Port:     &targetPort,
+	})
+	if udpSupported || (healthCheckPort.Type == intstr.Int && healthCheckPort.IntValue() != targetPort.IntValue()) {
+		hcPortToUse := healthCheckPort
+		if healthCheckPort.Type == intstr.String {
+			hcPortToUse = targetPort
+		}
+		networkingPorts = append(networkingPorts, elbv2api.NetworkingPort{
+			Protocol: &protocolTCP,
+			Port:     &hcPortToUse,
+		})
+	}
+	if targetControlPort != nil {
+		controlPort := intstr.FromInt32(*targetControlPort)
+		networkingPorts = append(networkingPorts, elbv2api.NetworkingPort{
+			Protocol: &protocolTCP,
+			Port:     &controlPort,
+		})
+	}
+
+	var ingress []elbv2modelk8s.NetworkingIngressRule
+	for _, port := range networkingPorts {
+		ingress = append(ingress, elbv2modelk8s.NetworkingIngressRule{
+			From:  peers,
+			Ports: []elbv2api.NetworkingPort{port},
+		})
+	}
+	return &elbv2modelk8s.TargetGroupBindingNetworking{Ingress: ingress}, nil
 }
 
 func (builder *targetGroupBindingNetworkBuilderImpl) nlbNoSecurityGroups(targetPort intstr.IntOrString, tgSpec elbv2model.TargetGroupSpec) (*elbv2modelk8s.TargetGroupBindingNetworking, error) {
