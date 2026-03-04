@@ -400,7 +400,9 @@ spec:
   manageBackendSecurityGroupRules: true
 ```
 
-Specify whether you want the controller to configure security group rules on the Node/Pod for traffic access when you specify securityGroups
+Specify whether you want the controller to configure security group rules on the Node/Pod for traffic access when you specify securityGroups.
+
+For **cross-region** Gateways (load balancer in a different region or VPC), the controller does not use the shared backend security group; it instead adds rules on targets using the load balancer's subnet CIDRs (IPv4 and IPv6 for dual-stack) so the edge ALB can reach targets for health checks and traffic. See [Security Groups for Load Balancers](../../deploy/security_groups.md#cross-region-gateway-api) for details.
 
 **Default** false
 
